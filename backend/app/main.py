@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,11 +11,23 @@ from app.models import Analysis
 from app.routes.auth import router as auth_router
 
 
+# ============================================================
+# DATABASE
+# ============================================================
+
 Base.metadata.create_all(bind=engine)
 
 
+# ============================================================
+# FASTAPI APP
+# ============================================================
+
 app = FastAPI(title="AI Sentiment Analyzer")
 
+
+# ============================================================
+# CORS
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,19 +41,33 @@ app.add_middleware(
 )
 
 
+# ============================================================
 # AI SENTIMENT MODEL
+# ============================================================
+
 sentiment_pipeline = pipeline(
-    "sentiment-analysis",
-    model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+    "text-classification",
+    model="j-hartmann/sentiment-roberta-large-english-3-classes",
 )
 
+# ============================================================
+# REQUEST MODEL
+# ============================================================
 
 class AnalyzeRequest(BaseModel):
     text: str
 
 
+# ============================================================
+# AUTH ROUTES
+# ============================================================
+
 app.include_router(auth_router)
 
+
+# ============================================================
+# ROOT
+# ============================================================
 
 @app.get("/")
 def root():
@@ -51,6 +75,10 @@ def root():
         "message": "AI Sentiment Analyzer API is running"
     }
 
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get("/api/health")
 def health_check():
@@ -69,6 +97,10 @@ def analyze_sentiment(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # --------------------------------------------------------
+    # Validate text
+    # --------------------------------------------------------
+
     text = request.text.strip()
 
     if not text:
@@ -77,7 +109,10 @@ def analyze_sentiment(
             detail="Text cannot be empty.",
         )
 
-    # Get ALL three sentiment probabilities
+    # --------------------------------------------------------
+    # Get all three sentiment probabilities
+    # --------------------------------------------------------
+
     results = sentiment_pipeline(
         text,
         truncation=True,
@@ -85,24 +120,41 @@ def analyze_sentiment(
         top_k=None,
     )
 
-    # Hugging Face can return:
-    # [[{...}, {...}, {...}]]
-    # or
-    # [{...}, {...}, {...}]
+    # Hugging Face may return either:
+    #
+    # [
+    #     {"label": "...", "score": ...},
+    #     {"label": "...", "score": ...},
+    #     {"label": "...", "score": ...}
+    # ]
+    #
+    # or:
+    #
+    # [
+    #     [
+    #         {"label": "...", "score": ...},
+    #         {"label": "...", "score": ...},
+    #         {"label": "...", "score": ...}
+    #     ]
+    # ]
+
     if results and isinstance(results[0], list):
         scores = results[0]
     else:
         scores = results
 
-    # Convert model labels to our application labels
+    # --------------------------------------------------------
+    # Convert model labels to application labels
+    # --------------------------------------------------------
+
     label_map = {
-        "LABEL_0": "NEGATIVE",
-        "LABEL_1": "NEUTRAL",
-        "LABEL_2": "POSITIVE",
-        "NEGATIVE": "NEGATIVE",
-        "NEUTRAL": "NEUTRAL",
-        "POSITIVE": "POSITIVE",
-    }
+    "LABEL_0": "NEGATIVE",
+    "LABEL_1": "NEUTRAL",
+    "LABEL_2": "POSITIVE",
+    "NEGATIVE": "NEGATIVE",
+    "NEUTRAL": "NEUTRAL",
+    "POSITIVE": "POSITIVE",
+}
 
     predictions = []
 
@@ -120,13 +172,20 @@ def analyze_sentiment(
                 }
             )
 
+    # --------------------------------------------------------
+    # Make sure the model returned a valid prediction
+    # --------------------------------------------------------
+
     if not predictions:
         raise HTTPException(
             status_code=503,
             detail="Sentiment model returned no supported predictions.",
         )
 
+    # --------------------------------------------------------
     # Select the sentiment with the highest probability
+    # --------------------------------------------------------
+
     best_prediction = max(
         predictions,
         key=lambda item: item["score"],
@@ -135,9 +194,27 @@ def analyze_sentiment(
     sentiment = best_prediction["sentiment"]
     confidence = best_prediction["score"]
 
-    # ========================================================
-    # SAVE ANALYSIS TO DATABASE
-    # ========================================================
+    # --------------------------------------------------------
+    # Debug output
+    # --------------------------------------------------------
+
+    print("\n--- SENTIMENT MODEL SCORES ---")
+
+    for prediction in sorted(
+        predictions,
+        key=lambda item: item["score"],
+        reverse=True,
+    ):
+        print(
+            f"{prediction['sentiment']}: "
+            f"{prediction['score'] * 100:.2f}%"
+        )
+
+    print("------------------------------\n")
+
+    # --------------------------------------------------------
+    # Save analysis to database
+    # --------------------------------------------------------
 
     analysis = Analysis(
         user_id=current_user.id,
@@ -150,15 +227,15 @@ def analyze_sentiment(
     db.commit()
     db.refresh(analysis)
 
-    # ========================================================
-    # RETURN RESULT TO FRONTEND
-    # ========================================================
+    # --------------------------------------------------------
+    # Return result to frontend
+    # --------------------------------------------------------
 
     return {
         "id": analysis.id,
         "sentiment": analysis.sentiment,
         "confidence": analysis.confidence,
-        "model": "cardiffnlp/twitter-roberta-base-sentiment-latest",
+        "model": "j-hartmann/sentiment-roberta-large-english-3-classes",
     }
 
 
@@ -173,12 +250,20 @@ def dashboard(
 ):
     user_id = current_user.id
 
+    # --------------------------------------------------------
+    # Total analyses
+    # --------------------------------------------------------
+
     total_analyses = (
         db.query(func.count(Analysis.id))
         .filter(Analysis.user_id == user_id)
         .scalar()
         or 0
     )
+
+    # --------------------------------------------------------
+    # Positive count
+    # --------------------------------------------------------
 
     positive_count = (
         db.query(func.count(Analysis.id))
@@ -190,6 +275,10 @@ def dashboard(
         or 0
     )
 
+    # --------------------------------------------------------
+    # Negative count
+    # --------------------------------------------------------
+
     negative_count = (
         db.query(func.count(Analysis.id))
         .filter(
@@ -199,6 +288,10 @@ def dashboard(
         .scalar()
         or 0
     )
+
+    # --------------------------------------------------------
+    # Neutral count
+    # --------------------------------------------------------
 
     neutral_count = (
         db.query(func.count(Analysis.id))
@@ -210,12 +303,20 @@ def dashboard(
         or 0
     )
 
+    # --------------------------------------------------------
+    # Average confidence
+    # --------------------------------------------------------
+
     average_confidence = (
         db.query(func.avg(Analysis.confidence))
         .filter(Analysis.user_id == user_id)
         .scalar()
         or 0
     )
+
+    # --------------------------------------------------------
+    # Recent analyses
+    # --------------------------------------------------------
 
     recent = (
         db.query(Analysis)
@@ -224,6 +325,10 @@ def dashboard(
         .limit(5)
         .all()
     )
+
+    # --------------------------------------------------------
+    # Sentiment over time
+    # --------------------------------------------------------
 
     sentiment_rows = (
         db.query(
@@ -239,6 +344,10 @@ def dashboard(
         .order_by(func.date(Analysis.created_at))
         .all()
     )
+
+    # --------------------------------------------------------
+    # Return dashboard data
+    # --------------------------------------------------------
 
     return {
         "total_analyses": total_analyses,
